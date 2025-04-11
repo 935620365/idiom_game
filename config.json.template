@@ -1,0 +1,30 @@
+{
+    // 成语猜猜乐API地址
+    "api_url": "https://xiaoapi.cn/API/game_ktccy.php",
+    
+    // 游戏缓存超时时间（秒），超过此时间未操作的游戏会自动结束
+    "cache_timeout": 300,
+    
+    // 每轮游戏的题目数量
+    "questions_per_round": 5,
+    
+    // 排行榜显示的最大人数
+    "leaderboard_size": 10,
+    
+    // GeWeChat API 配置
+    "gewechat_base_url": "",
+    "gewechat_token": "",
+    "gewechat_app_id": "",
+    
+    // OpenAI 配置
+    "enable_openai": true,
+    "openai_api_key": "",
+    "openai_model": "gpt-3.5-turbo",
+    "openai_timeout": 10,
+    "openai_api_base": "https://api.openai.com/v1",
+    "game_settings": {
+        "time_limit": 20,
+        "auto_next_delay": 1,
+        "correct_answer_delay": 3
+    }
+} 
