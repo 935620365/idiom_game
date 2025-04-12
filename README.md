@@ -61,14 +61,13 @@
 ### 必需依赖包
 ```bash
 # 基础依赖
-requests>=2.25.1
-python-dotenv>=0.19.0
+requests
+python-dotenv
 
 # OpenAI相关
-openai>=1.0.0
-
+openai
 # 其他工具
-pillow>=8.0.0  # 用于图片处理
+pillow  # 用于图片处理
 ```
 
 ### 安装依赖
