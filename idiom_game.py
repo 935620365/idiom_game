@@ -157,17 +157,14 @@ class IdiomGame(Plugin):
         elif content == "下一题":
             self._next_question(user_id, e_context)
             e_context.action = EventAction.BREAK_PASS
-        elif content == "帮助":
+        elif content == "猜成语帮助":
             self._show_help(e_context)
             e_context.action = EventAction.BREAK_PASS
         elif content == "排行榜":
             self._show_leaderboard(e_context)
             e_context.action = EventAction.BREAK_PASS
-        elif content == "重置排行榜" and self._is_admin(e_context):
+        elif content == "重置排行榜":
             self._reset_leaderboard(e_context)
-            e_context.action = EventAction.BREAK_PASS
-        elif content == "清理排行榜" and self._is_admin(e_context):
-            self._clean_leaderboard(e_context)
             e_context.action = EventAction.BREAK_PASS
 
     def _start_timer(self, user_id: str, e_context: EventContext):
@@ -347,19 +344,29 @@ class IdiomGame(Plugin):
                     "answered": False  # 初始化为未回答状态
                 }
                 
-                # 发送回复
+                # 使用channel直接发送消息
+                channel = e_context["channel"]
+                
+                # 发送游戏开始提示
+                start_message = (
+                    f"欢迎来到成语猜猜乐！\n"
+                    f"第1轮第1题（共{self.questions_per_round}题）\n"
+                    f"⏰ 每题限时{self.time_limit}秒\n"
+                    f"发送'提示'获取提示，发送'下一题'跳过当前题目"
+                )
                 reply = Reply()
                 reply.type = ReplyType.TEXT
-                reply.content = f"欢迎来到成语猜猜乐！\n第1轮第1题（共{self.questions_per_round}题）\n⏰ 每题限时{self.time_limit}秒\n发送'提示'获取提示，发送'下一题'跳过当前题目"
-                e_context['reply'] = reply
-                e_context.action = EventAction.BREAK_PASS
+                reply.content = start_message
+                channel.send(reply, e_context["context"])
+                
+                # 等待1秒后发送图片
+                time.sleep(1)
                 
                 # 发送图片
                 reply = Reply()
                 reply.type = ReplyType.IMAGE_URL
                 reply.content = data["data"]["pic"]
-                e_context['reply'] = reply
-                e_context.action = EventAction.BREAK_PASS
+                channel.send(reply, e_context["context"])
                 
                 # 启动定时器
                 self._start_timer(user_id, e_context)
@@ -380,11 +387,43 @@ class IdiomGame(Plugin):
             # 获取当前游戏状态
             game_state = self.game_states[user_id]
             current_round = game_state["current_round"]
+            current_answer = game_state.get("current_answer", "")
+            
+            # 获取用户昵称
+            user_name = self._get_user_name(e_context)
+            
+            # 使用channel直接发送消息
+            channel = e_context["channel"]
+            
+            # 如果是通过"下一题"命令跳过，显示当前题目的答案和解析
+            if current_answer:
+                # 尝试获取成语解释
+                idiom_explanation = ""
+                if self.enable_openai and self.openai_helper.is_available():
+                    try:
+                        explanation = self.openai_helper.get_idiom_explanation(current_answer)
+                        if explanation:
+                            idiom_explanation = f"\n\n📚 成语解析：\n{explanation}"
+                            logger.info(f"[IdiomGame] 为成语'{current_answer}'生成AI解析")
+                    except Exception as e:
+                        logger.error(f"[IdiomGame] 生成成语解释失败: {str(e)}", exc_info=True)
+                
+                # 发送答案和解析
+                skip_message = f"⏭️ 跳过本题\n当前题目答案：{current_answer}"
+                if idiom_explanation:
+                    skip_message += idiom_explanation
+                
+                reply = Reply()
+                reply.type = ReplyType.TEXT
+                reply.content = skip_message
+                channel.send(reply, e_context["context"])
+                
+                # 等待2秒后继续
+                time.sleep(2)
             
             # 检查是否完成一轮，或者即将超过配置的题目数量
             if current_round >= self.questions_per_round:
                 # 获取用户昵称和当前分数，更新排行榜
-                user_name = self._get_user_name(e_context)
                 current_score = game_state.get("score", 0)
                 
                 # 确保有有效的用户ID（使用session_id作为备用）
@@ -407,23 +446,16 @@ class IdiomGame(Plugin):
                 top_three = self._get_top_three(e_context)
                 
                 # 发送游戏结束消息
-                channel = e_context["channel"]
+                end_message = (
+                    f"🏆 本轮游戏结束！\n\n"
+                    f"🏆 本轮排行榜 🏆{top_three}\n\n"
+                    f"发送'猜成语'或'开始游戏'开始新一轮游戏\n"
+                    f"发送'排行榜'查看历史排行"
+                )
                 
-                # 先发送游戏结束消息
-                end_message = "🏆 本轮游戏结束！\n\n发送'猜成语'或'开始游戏'开始新一轮游戏"
                 reply = Reply()
                 reply.type = ReplyType.TEXT
                 reply.content = end_message
-                channel.send(reply, e_context["context"])
-                
-                # 等待1秒后发送排行榜
-                time.sleep(1)
-                
-                # 发送排行榜
-                leaderboard_message = f"🏆 本轮排行榜 🏆\n{top_three}\n\n发送'排行榜'查看历史排行"
-                reply = Reply()
-                reply.type = ReplyType.TEXT
-                reply.content = leaderboard_message
                 channel.send(reply, e_context["context"])
                 
                 # 删除游戏状态
@@ -447,32 +479,28 @@ class IdiomGame(Plugin):
                 if current_round > self.questions_per_round:
                     logger.warning(f"[IdiomGame] 题目计数超出预期: {current_round}/{self.questions_per_round}，强制结束游戏")
                     # 重复上面的游戏结束逻辑
-                    user_name = self._get_user_name(e_context)
                     current_score = game_state.get("score", 0)
                     
                     # 更新当前轮次排行榜
-                    self._update_current_round_score(user_id, user_name, current_score)
+                    self._update_current_round_score(effective_user_id, user_name, current_score)
                     
                     # 更新历史排行榜
-                    self._update_leaderboard(user_id, user_name, current_score)
+                    self._update_leaderboard(effective_user_id, user_name, current_score)
                     self._save_leaderboard()  # 确保保存排行榜数据
                     logger.info(f"[IdiomGame] 用户 {user_name} 完成游戏，得分 {current_score}，已更新排行榜")
                     
                     top_three = self._get_top_three(e_context)
-                    channel = e_context["channel"]
                     
-                    end_message = "🏆 本轮游戏结束！\n\n发送'猜成语'或'开始游戏'开始新一轮游戏"
+                    end_message = (
+                        f"🏆 本轮游戏结束！\n\n"
+                        f"🏆 本轮排行榜 🏆{top_three}\n\n"
+                        f"发送'猜成语'或'开始游戏'开始新一轮游戏\n"
+                        f"发送'排行榜'查看历史排行"
+                    )
+                    
                     reply = Reply()
                     reply.type = ReplyType.TEXT
                     reply.content = end_message
-                    channel.send(reply, e_context["context"])
-                    
-                    time.sleep(1)
-                    
-                    leaderboard_message = f"🏆 本轮排行榜 🏆\n{top_three}\n\n发送'排行榜'查看历史排行"
-                    reply = Reply()
-                    reply.type = ReplyType.TEXT
-                    reply.content = leaderboard_message
                     channel.send(reply, e_context["context"])
                     
                     if user_id in self.game_states:
@@ -483,9 +511,9 @@ class IdiomGame(Plugin):
                 game_state["current_pic"] = data["data"]["pic"]
                 game_state["current_answer"] = data["data"]["answer"]  # 保存新题目的答案
                 game_state["question_start_time"] = time.time()  # 更新题目开始时间
+                game_state["answered"] = False  # 重置答题状态
                 
                 # 发送文本提示
-                channel = e_context["channel"]
                 text_reply = Reply()
                 text_reply.type = ReplyType.TEXT
                 text_reply.content = (
@@ -601,7 +629,7 @@ class IdiomGame(Plugin):
                 # 标记此题已回答，防止定时器重复发送超时消息
                 game_state["answered"] = True
                 
-                # 确保有有效的用户ID（使用session_id作为备用）
+                # 确保有有效的用户ID
                 effective_user_id = user_id
                 if not effective_user_id or effective_user_id == "None":
                     session_id = e_context['context'].kwargs.get('session_id', '')
@@ -636,27 +664,37 @@ class IdiomGame(Plugin):
                     # 获取前三名信息
                     top_three = self._get_top_three(e_context)
                     
-                    # 发送游戏结束消息
+                    # 使用channel直接发送消息
+                    channel = e_context["channel"]
+                    
+                    # 1. 先发送答对消息和解析
                     answer_message = (
                         f"🎉 {user_name} 回答正确！+1分\n"
                         f"⏱ 用时：{time_used}秒"
                     )
-                    
                     if idiom_explanation:
                         answer_message += idiom_explanation
                     
-                    # 先发送答对消息
-                    self._send_text_reply(answer_message, e_context)
+                    reply = Reply()
+                    reply.type = ReplyType.TEXT
+                    reply.content = answer_message
+                    channel.send(reply, e_context["context"])
                     
-                    # 1秒后发送结束消息
-                    time.sleep(1)
-                    self._send_text_reply(
+                    # 2. 等待2秒后发送游戏结束消息
+                    time.sleep(2)
+                    
+                    # 3. 发送游戏结束和排行榜消息
+                    end_message = (
                         f"🏆 本轮游戏结束！\n\n"
                         f"🏆 本轮排行榜 🏆{top_three}\n\n"
                         f"发送'猜成语'或'开始游戏'开始新一轮游戏\n"
-                        f"发送'排行榜'查看历史排行",
-                        e_context
+                        f"发送'排行榜'查看历史排行"
                     )
+                    
+                    reply = Reply()
+                    reply.type = ReplyType.TEXT
+                    reply.content = end_message
+                    channel.send(reply, e_context["context"])
                     
                     # 删除游戏状态
                     del self.game_states[user_id]
@@ -723,8 +761,7 @@ class IdiomGame(Plugin):
         # 管理员帮助
         if self._is_admin(e_context):
             help_text += """\n\n管理员命令：
-1. 发送"重置排行榜"清空所有排行榜数据
-2. 发送"清理排行榜"合并重复数据"""
+1. 发送"重置排行榜"清空所有排行榜数据"""
             
         self._send_text_reply(help_text, e_context)
 
@@ -785,45 +822,50 @@ class IdiomGame(Plugin):
     
     def _update_leaderboard(self, user_id, user_name, score):
         """更新排行榜"""
-        # 如果用户ID为None，尝试使用用户名作为ID
-        if user_id is None:
-            logger.warning(f"[IdiomGame] 更新排行榜时用户ID为None，使用用户名作为ID: {user_name}")
-            if user_name and user_name not in ["未知用户", "玩家"]:
-                user_id = user_name
+        try:
+            # 如果用户ID为None，尝试使用用户名作为ID
+            if not user_id:
+                logger.warning(f"[IdiomGame] 更新排行榜时用户ID为空，尝试使用用户名: {user_name}")
+                if user_name and user_name not in ["未知用户", "玩家"]:
+                    user_id = f"name_{user_name}"  # 添加前缀，避免冲突
+                else:
+                    logger.error("[IdiomGame] 无法更新排行榜：用户ID和用户名都无效")
+                    return
+            
+            # 标准化用户ID，去除可能的前缀和后缀
+            normalized_id = self._normalize_user_id(user_id)
+            
+            # 检查是否已有该用户的其他ID形式存在于排行榜中
+            existing_entry = None
+            for lid, data in self.leaderboard.items():
+                if lid and self._normalize_user_id(lid) == normalized_id:
+                    existing_entry = lid
+                    break
+            
+            if existing_entry:
+                # 使用现有条目更新
+                user_data = self.leaderboard[existing_entry]
+                user_data["best_score"] = max(user_data["best_score"], score)
+                user_data["games_played"] += 1
+                user_data["total_score"] += score
+                if user_name and user_name not in ["未知用户", "玩家"]:
+                    user_data["name"] = user_name  # 只在有有效名称时更新
+                logger.debug(f"[IdiomGame] 更新现有排行榜记录: {user_name}, 最高分: {user_data['best_score']}")
             else:
-                logger.error("[IdiomGame] 无法更新排行榜：用户ID和用户名都无效")
-                return
-        
-        # 标准化用户ID，去除可能的前缀和后缀
-        normalized_id = self._normalize_user_id(user_id)
-        
-        # 检查是否已有该用户的其他ID形式存在于排行榜中
-        existing_entry = None
-        for lid, data in self.leaderboard.items():
-            if lid and self._normalize_user_id(lid) == normalized_id:
-                existing_entry = lid
-                break
-                
-        if existing_entry:
-            # 使用现有条目更新
-            user_data = self.leaderboard[existing_entry]
-            user_data["best_score"] = max(user_data["best_score"], score)
-            user_data["games_played"] += 1
-            user_data["total_score"] += score
-            if user_name and user_name != "未知用户" and user_name != "玩家":
-                user_data["name"] = user_name  # 只在有有效名称时更新
-        elif user_id:  # 确保user_id不为None
-            # 创建新条目
-            self.leaderboard[user_id] = {
-                "name": user_name if user_name and user_name != "未知用户" and user_name != "玩家" else f"用户{user_id[-6:] if isinstance(user_id, str) and len(user_id) > 6 else user_id}",
-                "best_score": score,
-                "games_played": 1,
-                "total_score": score
-            }
-            logger.debug(f"[IdiomGame] 新增排行榜用户: {user_id}, 昵称: {user_name}")
-        
-        # 保存排行榜
-        self._save_leaderboard()
+                # 创建新条目
+                self.leaderboard[user_id] = {
+                    "name": user_name if user_name and user_name not in ["未知用户", "玩家"] else f"用户{normalized_id[-6:]}",
+                    "best_score": score,
+                    "games_played": 1,
+                    "total_score": score
+                }
+                logger.debug(f"[IdiomGame] 新增排行榜用户: {user_id}, 昵称: {user_name}")
+            
+            # 保存排行榜
+            self._save_leaderboard()
+            
+        except Exception as e:
+            logger.error(f"[IdiomGame] 更新排行榜异常：{str(e)}", exc_info=True)
 
     def _normalize_user_id(self, user_id):
         """标准化用户ID，去除前缀和后缀，方便比较"""
@@ -984,11 +1026,24 @@ class IdiomGame(Plugin):
             
             # 更详细的日志，帮助调试
             if hasattr(msg_obj, '__dict__'):
-                logger.debug(f"[IdiomGame] 消息对象属性: {msg_obj.__dict__}")
+                msg_dict = msg_obj.__dict__
+                logger.debug(f"[IdiomGame] 消息对象完整属性: {msg_dict}")
             else:
                 logger.debug(f"[IdiomGame] 消息对象: {type(msg_obj)}")
             
             logger.debug(f"[IdiomGame] 上下文参数: {context_kwargs}")
+            
+            # 优先使用actual_user_nickname
+            if hasattr(msg_obj, 'actual_user_nickname') and msg_obj.actual_user_nickname:
+                nickname = msg_obj.actual_user_nickname
+                logger.debug(f"[IdiomGame] 从actual_user_nickname获取昵称: {nickname}")
+                return nickname
+            
+            # 其次使用other_user_nickname
+            if hasattr(msg_obj, 'other_user_nickname') and msg_obj.other_user_nickname:
+                nickname = msg_obj.other_user_nickname
+                logger.debug(f"[IdiomGame] 从other_user_nickname获取昵称: {nickname}")
+                return nickname
             
             # 获取用户ID - 优先从微信消息对象获取发送者ID
             user_id = None
@@ -997,6 +1052,24 @@ class IdiomGame(Plugin):
             if hasattr(msg_obj, 'fromUser'):
                 user_id = msg_obj.fromUser
                 logger.debug(f"[IdiomGame] 从fromUser获取用户ID: {user_id}")
+            
+            # 尝试从push_content获取昵称（小写形式）
+            if hasattr(msg_obj, 'push_content') and msg_obj.push_content:
+                push_content = msg_obj.push_content
+                if ' : ' in push_content:
+                    nickname = push_content.split(' : ')[0].strip()
+                    if nickname:
+                        logger.debug(f"[IdiomGame] 从push_content获取昵称: {nickname}")
+                        return nickname
+            
+            # 尝试从PushContent获取昵称（大写形式）
+            if hasattr(msg_obj, 'PushContent') and msg_obj.PushContent:
+                push_content = msg_obj.PushContent
+                if ' : ' in push_content:
+                    nickname = push_content.split(' : ')[0].strip()
+                    if nickname:
+                        logger.debug(f"[IdiomGame] 从PushContent获取昵称: {nickname}")
+                        return nickname
             
             # 其他可能的字段
             if not user_id and hasattr(msg_obj, 'from_user_id'):
@@ -1013,7 +1086,7 @@ class IdiomGame(Plugin):
                     user_id = session_id.split('@@')[0]
                     logger.debug(f"[IdiomGame] 从session_id分割获取用户ID: {user_id}")
             
-            # 检查获取的用户ID是否是群ID (如果是群ID，通常包含"@chatroom")
+            # 检查获取的用户ID是否是群ID
             if user_id and '@chatroom' in user_id:
                 logger.warning(f"[IdiomGame] 获取到的用户ID {user_id} 看起来像是群ID，尝试从其他来源获取")
                 user_id = None  # 重置用户ID
@@ -1029,23 +1102,9 @@ class IdiomGame(Plugin):
             
             # 如果是群聊且有用户ID，尝试获取群成员昵称
             if is_group and user_id:
-                # 获取群ID - 应该是包含"@chatroom"的ID
-                group_id = None
-                
-                # 从receiver获取群ID
-                if 'receiver' in context_kwargs:
-                    receiver = context_kwargs.get('receiver')
-                    if '@chatroom' in receiver:
-                        group_id = receiver
-                        logger.debug(f"[IdiomGame] 从receiver获取群ID: {group_id}")
-                
-                # 如果receiver不是群ID，尝试从session_id获取
-                if not group_id and '@@' in context_kwargs.get('session_id', ''):
-                    group_id = context_kwargs.get('session_id', '').split('@@')[1]
-                    logger.debug(f"[IdiomGame] 从session_id获取群ID: {group_id}")
-                
+                # 获取群ID
+                group_id = context_kwargs.get('receiver')
                 if group_id and '@chatroom' in group_id:
-                    # 尝试从缓存获取群成员信息
                     nickname = self._get_group_member_nickname(group_id, user_id)
                     if nickname:
                         logger.debug(f"[IdiomGame] 获取到群成员昵称: {nickname}")
@@ -1065,7 +1124,7 @@ class IdiomGame(Plugin):
             # 如果都获取不到，格式化用户ID作为昵称
             if user_id:
                 if user_id.startswith('wxid_'):
-                    nickname = f"用户{user_id.split('_')[-1][:6]}"
+                    nickname = f"用户{user_id.split('_')[-1][:6]}"  # 恢复使用格式化的昵称
                     logger.debug(f"[IdiomGame] 格式化wxid为昵称: {nickname}")
                     return nickname
                 logger.debug(f"[IdiomGame] 使用用户ID作为昵称: {user_id}")
@@ -1135,26 +1194,67 @@ class IdiomGame(Plugin):
 
     def _is_admin(self, e_context: EventContext):
         """检查用户是否为管理员"""
-        # 简单实现：仅检查是否为群主或特定ID
         try:
             user_id = None
-            # 尝试从session_id获取用户ID
-            session_id = e_context['context'].kwargs.get('session_id', '')
-            if '@@' in session_id:
-                user_id = session_id.split('@@')[0]
+            context = e_context['context']
             
-            # 检查是否为群主或特定ID
-            # 可以在这里添加更复杂的管理员检查逻辑
-            admin_ids = ["wxid_9uwska6u4yzm22"]  # 管理员ID列表
+            # 1. 尝试从msg对象获取
+            msg = context.kwargs.get('msg')
+            if msg:
+                # 尝试从Data字段获取
+                if hasattr(msg, 'Data') and isinstance(msg.Data, dict):
+                    from_user = msg.Data.get('FromUserName', {})
+                    if isinstance(from_user, dict) and 'string' in from_user:
+                        user_id = from_user['string']
+                        logger.debug(f"[IdiomGame] 从Data.FromUserName获取用户ID: {user_id}")
+                
+                # 如果还没有，尝试其他字段
+                if not user_id:
+                    if hasattr(msg, 'fromUser'):
+                        user_id = msg.fromUser
+                        logger.debug(f"[IdiomGame] 从fromUser获取用户ID: {user_id}")
+                    elif hasattr(msg, 'FromUserName'):
+                        if isinstance(msg.FromUserName, dict) and 'string' in msg.FromUserName:
+                            user_id = msg.FromUserName['string']
+                        else:
+                            user_id = msg.FromUserName
+                        logger.debug(f"[IdiomGame] 从FromUserName获取用户ID: {user_id}")
             
-            # 日志记录
-            logger.debug(f"[IdiomGame] 管理员检查: user_id={user_id}, is_admin={user_id in admin_ids}")
+            # 2. 如果还没有，尝试从context直接获取
+            if not user_id:
+                user_id = context.get('from_user_id')
+                if user_id:
+                    logger.debug(f"[IdiomGame] 从context.from_user_id获取用户ID: {user_id}")
             
-            return user_id in admin_ids
+            # 3. 如果还没有，尝试从session_id获取
+            if not user_id:
+                session_id = context.kwargs.get('session_id', '')
+                if session_id:
+                    if '@@' in session_id:
+                        user_id = session_id.split('@@')[0]
+                    elif '@' in session_id:
+                        user_id = session_id.split('@')[0]
+                    logger.debug(f"[IdiomGame] 从session_id获取用户ID: {user_id}")
+            
+            # 如果仍然没有user_id，记录日志并返回False
+            if not user_id:
+                logger.warning("[IdiomGame] 无法获取用户ID，权限检查失败")
+                return False
+            
+            # 从配置文件获取管理员列表
+            admin_users = conf().get('admin_users', ["wxid_9uwska6u4yzm22"])
+            
+            # 检查是否为管理员
+            is_admin = user_id in admin_users
+            
+            logger.debug(f"[IdiomGame] 管理员检查: user_id={user_id}, is_admin={is_admin}, admin_users={admin_users}")
+            
+            return is_admin
+            
         except Exception as e:
-            logger.error(f"[IdiomGame] 检查管理员权限异常: {str(e)}")
+            logger.error(f"[IdiomGame] 管理员检查异常: {str(e)}", exc_info=True)
             return False
-            
+
     def _reset_leaderboard(self, e_context: EventContext):
         """重置排行榜"""
         try:
@@ -1361,6 +1461,45 @@ class IdiomGame(Plugin):
         except Exception as e:
             logger.error(f"[IdiomGame] 结束游戏异常：{str(e)}", exc_info=True)
             self._send_text_reply("结束游戏失败，请稍后再试", e_context)
+
+    def _clear_history_leaderboard(self, e_context: EventContext):
+        """清除历史排行榜"""
+        try:
+            # 获取用户昵称
+            user_name = self._get_user_name(e_context)
+            
+            # 备份当前排行榜
+            backup_file = os.path.join(os.path.dirname(__file__), f"leaderboard_backup_{int(time.time())}.json")
+            try:
+                with open(self.leaderboard_file, 'r', encoding='utf-8') as f:
+                    current_data = f.read()
+                with open(backup_file, 'w', encoding='utf-8') as f:
+                    f.write(current_data)
+                logger.info(f"[IdiomGame] 已备份排行榜数据到: {backup_file}")
+            except Exception as e:
+                logger.error(f"[IdiomGame] 备份排行榜数据失败: {str(e)}")
+            
+            # 清空排行榜数据
+            self.leaderboard = {}
+            self._save_leaderboard()
+            
+            # 清空当前轮次排行榜
+            self.current_round_scores = {}
+            
+            # 发送确认消息
+            confirm_message = (
+                f"✨ 历史排行榜已清除\n"
+                f"操作者：{user_name}\n"
+                f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"💾 原数据已备份"
+            )
+            self._send_text_reply(confirm_message, e_context)
+            
+            logger.info(f"[IdiomGame] 历史排行榜已被管理员 {user_name} 清除")
+            
+        except Exception as e:
+            logger.error(f"[IdiomGame] 清除历史排行榜异常: {str(e)}", exc_info=True)
+            self._send_text_reply("清除历史排行榜失败，请稍后再试", e_context)
 
 # OpenAI助手类
 class OpenAIHelper:
