@@ -200,11 +200,30 @@ class IdiomGame(Plugin):
         elif content == "历史排行榜":
             self._show_leaderboard(e_context)
             e_context.action = EventAction.BREAK_PASS
-        elif content == "重置历史排行榜" and self._is_admin(user_id):
-            self._reset_leaderboard(e_context)
-            e_context.action = EventAction.BREAK_PASS
-        elif content == "重置历史排行榜" and not self._is_admin(user_id):
-            self._send_text_reply("抱歉，只有管理员才能重置历史排行榜。发送'猜成语认证+密码'进行管理员认证。", e_context)
+        elif content == "重置历史排行榜":
+            # 确保有有效的用户ID
+            if not user_id:
+                session_id = context_kwargs.get('session_id', '')
+                if session_id:
+                    if '@@' in session_id:
+                        user_id = session_id.split('@@')[0]
+                    elif '@' in session_id:
+                        user_id = session_id.split('@')[0]
+                    else:
+                        user_id = session_id
+                logger.debug(f"[IdiomGame] 使用session_id作为用户ID: {user_id}")
+            
+            if not user_id:
+                self._send_text_reply("无法获取用户ID，请重试", e_context)
+                e_context.action = EventAction.BREAK_PASS
+                return
+                
+            if not self.admin_users:  # 如果没有管理员，提示需要认证
+                self._send_text_reply("请先进行管理员认证。发送'猜成语认证+密码'进行认证。", e_context)
+            elif self._is_admin(user_id):
+                self._reset_leaderboard(e_context)
+            else:
+                self._send_text_reply("抱歉，只有管理员才能重置历史排行榜。发送'猜成语认证+密码'进行管理员认证。", e_context)
             e_context.action = EventAction.BREAK_PASS
 
     def _handle_auth(self, user_id: str, password: str, e_context: EventContext):
