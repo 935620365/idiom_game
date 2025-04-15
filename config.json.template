@@ -15,7 +15,8 @@
     "gewechat_base_url": "",
     "gewechat_token": "",
     "gewechat_app_id": "",
-    
+    // 管理员认证密码
+    "auth_password": "1122",
     // OpenAI 配置
     "enable_openai": true,
     "openai_api_key": "",
