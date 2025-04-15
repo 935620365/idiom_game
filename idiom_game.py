@@ -45,6 +45,7 @@ class IdiomGame(Plugin):
         "openai_model": "gpt-3.5-turbo",  # OpenAI模型
         "openai_timeout": 10,  # OpenAI请求超时时间(秒)
         "openai_api_base": "https://api.openai.com/v1",  # OpenAI API基础地址
+        "auth_password": "",  # 管理员认证密码
     }
 
     def __init__(self):
@@ -70,6 +71,10 @@ class IdiomGame(Plugin):
             self.gewechat_base_url = self.config.get("gewechat_base_url", "")
             self.gewechat_token = self.config.get("gewechat_token", "")
             self.gewechat_app_id = self.config.get("gewechat_app_id", "")
+            self.auth_password = self.config.get("auth_password", "1122")
+            
+            # 管理员列表
+            self.admin_users = set()
             
             # OpenAI配置
             self.enable_openai = self.config.get("enable_openai", True)
@@ -130,10 +135,42 @@ class IdiomGame(Plugin):
             return
 
         content = e_context['context'].content
-        user_id = e_context['context'].get('user_id')
+        context_kwargs = e_context['context'].kwargs
+        msg = context_kwargs.get('msg')
+        
+        # 获取用户ID
+        user_id = None
+        if msg and hasattr(msg, 'Data') and isinstance(msg.Data, dict):
+            from_user = msg.Data.get('FromUserName', {})
+            if isinstance(from_user, dict) and 'string' in from_user:
+                user_id = from_user['string']
+        
+        if not user_id and msg:
+            if hasattr(msg, 'fromUser'):
+                user_id = msg.fromUser
+            elif hasattr(msg, 'FromUserName'):
+                if isinstance(msg.FromUserName, dict) and 'string' in msg.FromUserName:
+                    user_id = msg.FromUserName['string']
+                else:
+                    user_id = msg.FromUserName
+        
+        if not user_id:
+            session_id = context_kwargs.get('session_id', '')
+            if session_id:
+                if '@@' in session_id:
+                    user_id = session_id.split('@@')[0]
+                elif '@' in session_id:
+                    user_id = session_id.split('@')[0]
         
         # 清理过期缓存
         self._clean_expired_cache()
+        
+        # 处理管理员认证
+        if content.startswith("猜成语认证"):
+            password = content[5:].strip()  # 提取密码部分
+            self._handle_auth(user_id, password, e_context)
+            e_context.action = EventAction.BREAK_PASS
+            return
         
         # 处理游戏命令
         if content in ["开始游戏", "猜成语"]:
@@ -160,12 +197,97 @@ class IdiomGame(Plugin):
         elif content == "猜成语帮助":
             self._show_help(e_context)
             e_context.action = EventAction.BREAK_PASS
-        elif content == "排行榜":
+        elif content == "历史排行榜":
             self._show_leaderboard(e_context)
             e_context.action = EventAction.BREAK_PASS
-        elif content == "重置排行榜":
+        elif content == "重置历史排行榜" and self._is_admin(user_id):
             self._reset_leaderboard(e_context)
             e_context.action = EventAction.BREAK_PASS
+        elif content == "重置历史排行榜" and not self._is_admin(user_id):
+            self._send_text_reply("抱歉，只有管理员才能重置历史排行榜。发送'猜成语认证+密码'进行管理员认证。", e_context)
+            e_context.action = EventAction.BREAK_PASS
+
+    def _handle_auth(self, user_id: str, password: str, e_context: EventContext):
+        """处理管理员认证"""
+        try:
+            # 从消息对象获取用户ID
+            msg_obj = e_context['context'].kwargs.get('msg')
+            if msg_obj:
+                # 尝试从Data字段获取
+                if hasattr(msg_obj, 'Data') and isinstance(msg_obj.Data, dict):
+                    from_user = msg_obj.Data.get('FromUserName', {})
+                    if isinstance(from_user, dict) and 'string' in from_user:
+                        user_id = from_user['string']
+                        logger.debug(f"[IdiomGame] 从Data.FromUserName获取用户ID: {user_id}")
+                
+                # 尝试从其他字段获取
+                if not user_id:
+                    if hasattr(msg_obj, 'fromUser'):
+                        user_id = msg_obj.fromUser
+                    elif hasattr(msg_obj, 'FromUserName'):
+                        if isinstance(msg_obj.FromUserName, dict) and 'string' in msg_obj.FromUserName:
+                            user_id = msg_obj.FromUserName['string']
+                        else:
+                            user_id = msg_obj.FromUserName
+            
+            # 如果从消息对象获取失败，尝试从session_id获取
+            if not user_id:
+                session_id = e_context['context'].kwargs.get('session_id', '')
+                if session_id:
+                    # 直接使用session_id作为user_id，因为它是有效的wxid
+                    user_id = session_id
+                    logger.debug(f"[IdiomGame] 使用session_id作为用户ID: {user_id}")
+            
+            if not user_id:
+                self._send_text_reply("认证失败，无法获取用户ID", e_context)
+                logger.error("[IdiomGame] 管理员认证失败：无法获取用户ID")
+                return
+                
+            if password == self.auth_password:
+                # 使用标准化的用户ID
+                normalized_id = self._normalize_user_id(user_id)
+                # 保存原始完整ID
+                self.admin_users.add(user_id)
+                logger.info(f"[IdiomGame] 用户 {user_id} (normalized: {normalized_id}) 成功通过管理员认证")
+                logger.debug(f"[IdiomGame] 当前管理员列表: {self.admin_users}")
+                self._send_text_reply("✅ 管理员认证成功！现在您可以使用管理员功能了。", e_context)
+            else:
+                self._send_text_reply("❌ 认证失败，密码错误！", e_context)
+                logger.warning(f"[IdiomGame] 用户 {user_id} 管理员认证失败，密码错误")
+        except Exception as e:
+            logger.error(f"[IdiomGame] 管理员认证异常: {str(e)}", exc_info=True)
+            self._send_text_reply("认证过程出现错误，请稍后重试", e_context)
+
+    def _is_admin(self, user_id: str) -> bool:
+        """检查用户是否为管理员"""
+        try:
+            if not user_id:
+                logger.warning("[IdiomGame] 用户ID为空，权限检查失败")
+                return False
+            
+            # 直接检查原始ID是否在管理员列表中
+            if user_id in self.admin_users:
+                logger.info(f"[IdiomGame] 用户 {user_id} 是管理员（直接匹配）")
+                return True
+            
+            # 如果直接匹配失败，尝试标准化后比对
+            normalized_id = self._normalize_user_id(user_id)
+            logger.debug(f"[IdiomGame] 权限检查 - 原始ID: {user_id}, 标准化ID: {normalized_id}")
+            
+            # 检查标准化后的ID是否匹配任何管理员
+            for admin_id in self.admin_users:
+                admin_normalized = self._normalize_user_id(admin_id)
+                logger.debug(f"[IdiomGame] 比对管理员 - 原始ID: {admin_id}, 标准化ID: {admin_normalized}")
+                if admin_normalized == normalized_id:
+                    logger.info(f"[IdiomGame] 用户 {user_id} 是管理员（标准化匹配）")
+                    return True
+            
+            logger.debug(f"[IdiomGame] 用户 {user_id} 不是管理员")
+            return False
+            
+        except Exception as e:
+            logger.error(f"[IdiomGame] 管理员检查异常: {str(e)}", exc_info=True)
+            return False
 
     def _start_timer(self, user_id: str, e_context: EventContext):
         """启动定时器"""
@@ -450,7 +572,7 @@ class IdiomGame(Plugin):
                     f"🏆 本轮游戏结束！\n\n"
                     f"🏆 本轮排行榜 🏆{top_three}\n\n"
                     f"发送'猜成语'或'开始游戏'开始新一轮游戏\n"
-                    f"发送'排行榜'查看历史排行"
+                    f"发送'历史排行榜'查看历史排行"
                 )
                 
                 reply = Reply()
@@ -495,7 +617,7 @@ class IdiomGame(Plugin):
                         f"🏆 本轮游戏结束！\n\n"
                         f"🏆 本轮排行榜 🏆{top_three}\n\n"
                         f"发送'猜成语'或'开始游戏'开始新一轮游戏\n"
-                        f"发送'排行榜'查看历史排行"
+                        f"发送'历史排行榜'查看历史排行"
                     )
                     
                     reply = Reply()
@@ -688,7 +810,7 @@ class IdiomGame(Plugin):
                         f"🏆 本轮游戏结束！\n\n"
                         f"🏆 本轮排行榜 🏆{top_three}\n\n"
                         f"发送'猜成语'或'开始游戏'开始新一轮游戏\n"
-                        f"发送'排行榜'查看历史排行"
+                        f"发送'历史排行榜'查看历史排行"
                     )
                     
                     reply = Reply()
@@ -755,13 +877,12 @@ class IdiomGame(Plugin):
 4. 发送"我猜xxx"提交答案（xxx为猜测的成语）
 5. 发送"下一题"跳过当前题目
 6. 发送"结束游戏"结束当前游戏
-7. 发送"排行榜"查看成绩排行
-8. 发送"帮助"查看本帮助信息"""
+7. 发送"历史排行榜"查看成绩排行
+8. 发送"帮助"查看本帮助信息
 
-        # 管理员帮助
-        if self._is_admin(e_context):
-            help_text += """\n\n管理员命令：
-1. 发送"重置排行榜"清空所有排行榜数据"""
+管理员功能：
+1. 发送"猜成语认证+密码"进行管理员认证
+2. 发送"重置历史排行榜"清空所有排行榜数据（仅限管理员）"""
             
         self._send_text_reply(help_text, e_context)
 
@@ -869,12 +990,21 @@ class IdiomGame(Plugin):
 
     def _normalize_user_id(self, user_id):
         """标准化用户ID，去除前缀和后缀，方便比较"""
-        # 如果是wxid格式，提取核心ID部分
-        if isinstance(user_id, str):
-            if user_id.startswith('wxid_'):
-                return user_id.split('_')[-1][:8]  # 提取ID的特征部分
-            elif '@' in user_id:
-                return user_id.split('@')[0]  # 去除@后的部分
+        if not isinstance(user_id, str):
+            return user_id
+            
+        # 处理群聊消息中的用户ID（格式可能是 wxid_xxx@@groupid）
+        if '@@' in user_id:
+            user_id = user_id.split('@@')[0]
+            
+        # 处理wxid格式
+        if user_id.startswith('wxid_'):
+            return user_id.split('_')[1][:8]  # 提取ID的特征部分
+            
+        # 处理其他格式（如带@chatroom后缀）
+        if '@' in user_id:
+            return user_id.split('@')[0]
+            
         return user_id
 
     def _show_leaderboard(self, e_context: EventContext):
@@ -883,9 +1013,42 @@ class IdiomGame(Plugin):
             self._send_text_reply("历史排行榜暂无数据", e_context)
             return
         
+        # 检查是否是群聊消息
+        context_kwargs = e_context['context'].kwargs
+        is_group = context_kwargs.get('isgroup', False)
+        group_id = None
+        group_members = None
+        
+        if is_group:
+            # 获取群ID
+            msg_obj = context_kwargs.get('msg')
+            if msg_obj and hasattr(msg_obj, 'receiver'):
+                group_id = msg_obj.receiver
+            if not group_id:
+                group_id = context_kwargs.get('receiver')
+            
+            if group_id and '@chatroom' in group_id:
+                # 获取群成员列表
+                with self.group_members_lock:
+                    if group_id in self.group_members_cache:
+                        group_members = set(self.group_members_cache[group_id].get("members", {}).keys())
+                        logger.debug(f"[IdiomGame] 获取到群 {group_id} 的成员列表: {len(group_members)} 人")
+        
         # 合并同一用户的不同记录
         merged_leaderboard = {}
         for user_id, data in self.leaderboard.items():
+            # 如果是群聊且有群成员列表，只显示群成员的记录
+            if is_group and group_members is not None:
+                normalized_id = self._normalize_user_id(user_id)
+                # 检查用户是否在群成员列表中
+                user_in_group = False
+                for member_id in group_members:
+                    if self._normalize_user_id(member_id) == normalized_id:
+                        user_in_group = True
+                        break
+                if not user_in_group:
+                    continue
+            
             normalized_id = self._normalize_user_id(user_id)
             if normalized_id in merged_leaderboard:
                 # 合并数据
@@ -907,7 +1070,10 @@ class IdiomGame(Plugin):
         )
         
         # 生成排行榜文本
-        leaderboard_text = "📊 成语猜猜乐历史排行榜 📊\n\n"
+        title = "📊 成语猜猜乐历史排行榜 📊"
+        if is_group and group_members is not None:
+            title = "📊 本群成语猜猜乐历史排行榜 📊"
+        leaderboard_text = f"{title}\n\n"
         
         for i, (uid, data) in enumerate(sorted_users[:self.leaderboard_size]):
             medal = ""
@@ -1192,69 +1358,6 @@ class IdiomGame(Plugin):
         
         return None 
 
-    def _is_admin(self, e_context: EventContext):
-        """检查用户是否为管理员"""
-        try:
-            user_id = None
-            context = e_context['context']
-            
-            # 1. 尝试从msg对象获取
-            msg = context.kwargs.get('msg')
-            if msg:
-                # 尝试从Data字段获取
-                if hasattr(msg, 'Data') and isinstance(msg.Data, dict):
-                    from_user = msg.Data.get('FromUserName', {})
-                    if isinstance(from_user, dict) and 'string' in from_user:
-                        user_id = from_user['string']
-                        logger.debug(f"[IdiomGame] 从Data.FromUserName获取用户ID: {user_id}")
-                
-                # 如果还没有，尝试其他字段
-                if not user_id:
-                    if hasattr(msg, 'fromUser'):
-                        user_id = msg.fromUser
-                        logger.debug(f"[IdiomGame] 从fromUser获取用户ID: {user_id}")
-                    elif hasattr(msg, 'FromUserName'):
-                        if isinstance(msg.FromUserName, dict) and 'string' in msg.FromUserName:
-                            user_id = msg.FromUserName['string']
-                        else:
-                            user_id = msg.FromUserName
-                        logger.debug(f"[IdiomGame] 从FromUserName获取用户ID: {user_id}")
-            
-            # 2. 如果还没有，尝试从context直接获取
-            if not user_id:
-                user_id = context.get('from_user_id')
-                if user_id:
-                    logger.debug(f"[IdiomGame] 从context.from_user_id获取用户ID: {user_id}")
-            
-            # 3. 如果还没有，尝试从session_id获取
-            if not user_id:
-                session_id = context.kwargs.get('session_id', '')
-                if session_id:
-                    if '@@' in session_id:
-                        user_id = session_id.split('@@')[0]
-                    elif '@' in session_id:
-                        user_id = session_id.split('@')[0]
-                    logger.debug(f"[IdiomGame] 从session_id获取用户ID: {user_id}")
-            
-            # 如果仍然没有user_id，记录日志并返回False
-            if not user_id:
-                logger.warning("[IdiomGame] 无法获取用户ID，权限检查失败")
-                return False
-            
-            # 从配置文件获取管理员列表
-            admin_users = conf().get('admin_users', ["wxid_9uwska6u4yzm22"])
-            
-            # 检查是否为管理员
-            is_admin = user_id in admin_users
-            
-            logger.debug(f"[IdiomGame] 管理员检查: user_id={user_id}, is_admin={is_admin}, admin_users={admin_users}")
-            
-            return is_admin
-            
-        except Exception as e:
-            logger.error(f"[IdiomGame] 管理员检查异常: {str(e)}", exc_info=True)
-            return False
-
     def _reset_leaderboard(self, e_context: EventContext):
         """重置排行榜"""
         try:
@@ -1450,7 +1553,7 @@ class IdiomGame(Plugin):
                 top_three = self._get_top_three(e_context)
                 end_message += f"\n\n🏆 本轮排行榜 🏆\n{top_three}"
             
-            end_message += "\n\n发送'猜成语'或'开始游戏'开始新一轮游戏"
+            end_message += "\n\n发送'猜成语'或'开始游戏'开始新一轮游戏\n发送'历史排行榜'查看历史排行"
             
             # 发送消息
             self._send_text_reply(end_message, e_context)
