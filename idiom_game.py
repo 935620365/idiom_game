@@ -536,8 +536,12 @@ class IdiomGame(Plugin):
             # 使用channel直接发送消息
             channel = e_context["channel"]
             
-            # 如果是通过"下一题"命令跳过，显示当前题目的答案和解析
-            if current_answer:
+            # 如果是通过"下一题"命令跳过，且此题未被标记为已回答，显示当前题目的答案和解析
+            # 添加一个条件，确保不会在定时器已经触发后显示重复消息
+            if current_answer and not game_state.get("answered", False):
+                # 先标记为已回答，防止定时器重复处理
+                game_state["answered"] = True
+                
                 # 尝试获取成语解释
                 idiom_explanation = ""
                 if self.enable_openai and self.openai_helper.is_available():
